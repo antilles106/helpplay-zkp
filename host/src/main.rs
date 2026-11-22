@@ -8,7 +8,7 @@
 //! See lib.rs for the file formats.
 
 use anyhow::{bail, Context, Result};
-use helpplay_core::{verify, Claim, Input};
+use helpplay_core::{verify, Claim, Input, Kind};
 use host::logging::{format_duration, handler_for, set_handler, set_level, timed, Level};
 use host::{load_problem, load_problem_with_meta, load_solutions, log_debug, log_error, log_info};
 use methods::{HELPPLAY_GUEST_ELF, HELPPLAY_GUEST_ID};
@@ -83,11 +83,13 @@ fn check(problem_path: &str, receipt_path: &str) -> Result<()> {
         _ => "unknown",
     };
 
-    let what = match problem.k {
-        1 => "a solution".to_string(),
-        k => format!("{k} distinct solutions"),
+    let what = match (problem.kind, problem.k) {
+        (Kind::Release, 1) => "a legal game reaching the position".to_string(),
+        (Kind::Release, k) => format!("{k} distinct legal games reaching the position"),
+        (_, 1) => format!("a solution of {}", problem.label()),
+        (_, k) => format!("{k} distinct solutions of {}", problem.label()),
     };
-    log_info!("OK: {} knows {what} of {}", claim.claimant, problem.label());
+    log_info!("OK: {} knows {what}", claim.claimant);
     if let Some(summary) = meta.summary() {
         log_info!("    problem: {summary}");
     }

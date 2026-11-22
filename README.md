@@ -1,6 +1,7 @@
 # helpplay-zkp
 
 A RISC Zero program that proves you **know k distinct solutions** (k = 1 by default) to a helpmate (h#n / h#n.5) or a proof game (PG n.0 / n.5) **without revealing them**.
+It can also prove that a position is legal (Release the position) by proving knowledge of a game reaching it, without revealing the game.
 Proofs are produced in Groth16 format.
 
 ## Layout
@@ -17,6 +18,7 @@ Proofs are produced in Groth16 format.
 | `hmazemmour25.json` / `hmazemmour25_sol.txt` | H. Maeshima, The 11th Azemmour Tournament 2025: h#2, two solutions (k = 2). Also a regression test |
 | `hmhopper25.json` / `hmhopper25_sol.txt` | H. Maeshima, The Hopper 2025: h#4.5. Also a regression test |
 | `pg_problem.json` / `pg_solution.txt` | T. Orban, Die Schwalbe 1976: proof game PG 4.0 |
+| `release_problem.json` / `release_solution.txt` | Release the position: the position of the Orban PG with a full FEN (Black cannot castle). Also a regression test |
 
 Public: the problem type, the position (FEN), the number of moves, k, excluded known solutions, the claimant
 Secret: the solutions (the moves)
@@ -48,9 +50,9 @@ Converting proofs to Groth16 format requires **Docker** (x86_64). Without an NVI
 
 | Key | Meaning | Default |
 |---|---|---|
-| `kind` | `"helpmate"` or `"proof_game"` | `"helpmate"` |
-| `fen` | Helpmate: the starting position. Proof game: the target position. In both, the piece placement alone is enough (see below) | (required) |
-| `n` | Move count, written as `x`, `x.0` or `x.5`: `x` and `x.0` mean 2x plies, `x.5` means 2x+1 plies. A number (`2.5`) or a string (`"2.5"`) | (required) |
+| `kind` | `"helpmate"`, `"proof_game"` or `"release"` | `"helpmate"` |
+| `fen` | Helpmate: the starting position. Proof game / release: the target position. The piece placement alone is enough (see below) | (required) |
+| `n` | Move count, written as `x`, `x.0` or `x.5`: `x` and `x.0` mean 2x plies, `x.5` means 2x+1 plies. A number (`2.5`) or a string (`"2.5"`). Must be omitted for `release` | (required except for `release`) |
 | `k` | Number of pairwise distinct solutions to prove knowledge of | `1` |
 | `exclude` | Known solutions to exclude (e.g. the author's solution) | none |
 | `author` | Metadata: the composer, or a list for joint compositions | none |
@@ -161,6 +163,30 @@ cargo run --release -p host -- verify examples/pg_problem.json pg.bin
 # => OK: alice knows a solution of PG 4.0
 #        problem: Orban, Tibor, Die Schwalbe 1976
 ```
+
+### Release the position
+
+Set `"kind": "release"` to prove that a position is legal: you know a legal game of **any length** from the standard initial position that reaches it.
+For example, a composer can show solvers that a retro problem's position is legal without giving away the game. `n` is not used and must be omitted.
+
+- If `fen` has **only the piece placement**, only the placement is compared.
+- If `fen` is a **full FEN**, the side to move, castling rights and en passant square are compared too (the move counters are ignored).
+  Write the en passant square only when an en passant capture is actually legal, and `-` otherwise.
+
+`examples/release_problem.json` is the position of the Orban proof game above, with White to move and only White able to castle (`w KQ -`):
+the black king stands on e8 but has moved. `examples/release_solution.txt` is one game (on one line) reaching it; any other legal game would do as well.
+
+```sh
+cargo run --release -p host -- prove examples/release_problem.json examples/release_solution.txt alice release.bin
+cargo run --release -p host -- verify examples/release_problem.json release.bin
+# => OK: alice knows a legal game reaching the position
+```
+
+Notes:
+- The game may pass through any positions, but it must not contain a checkmate or stalemate before the end (no move is legal after one).
+  The 50/75-move rule and repetitions are not considered.
+- A legal position can be reached by many games, so `k` and `exclude` are of little use here.
+- Very long games make proving slower, but there is no length limit.
 
 ### k distinct solutions
 

@@ -1,12 +1,14 @@
 //! Loading problem and solution files, and running the guest. Shared by the CLI and the tests.
 //!
 //! problem.json : {"kind": "helpmate", "fen": "...", "n": 2.5, "k": 1, "exclude": [["...", "..."]]}
-//!                kind: "helpmate" (default) or "proof_game".
-//!                n: move count, written as x, x.0 or x.5 (a number or a string).
+//!                kind: "helpmate" (default), "proof_game" or "release".
+//!                n: move count, written as x, x.0 or x.5 (a number or a string). Not used for release.
 //!                   x and x.0 mean 2x plies; x.5 means 2x+1 plies.
 //!                Helpmate: fen is the starting position. h#x is Black first, h#x.5 White first.
 //!                   If fen has only the piece placement, the side to move is filled in.
 //!                Proof game: fen is the target position (only piece placement is compared). White first.
+//!                Release: a legal game of any length from the initial position reaching fen.
+//!                   A full FEN also fixes side to move, castling rights and en passant.
 //!                k: number of pairwise distinct solutions to prove knowledge of (default 1).
 //!                kind, k and exclude are optional.
 //!                Metadata (all optional, ignored by the proof and not written to the journal):
@@ -30,7 +32,7 @@ struct ProblemFile {
     #[serde(default)]
     kind: Kind,
     fen: String,
-    n: serde_json::Value,
+    n: Option<serde_json::Value>,
     k: Option<u32>,
     #[serde(default)]
     exclude: Vec<Vec<String>>,
@@ -123,7 +125,12 @@ pub fn parse_count(v: &serde_json::Value) -> Result<(u32, bool)> {
 /// Parses the contents of a problem.json file into the problem and its metadata.
 pub fn parse_problem(json: &str) -> Result<(Problem, Meta)> {
     let file: ProblemFile = serde_json::from_str(json)?;
-    let (n, half) = parse_count(&file.n)?;
+    let (n, half) = match (file.kind, &file.n) {
+        (Kind::Release, None) => (0, false),
+        (Kind::Release, Some(_)) => bail!("n is not used for release (the game may have any length)"),
+        (_, Some(n)) => parse_count(n)?,
+        (_, None) => bail!("missing field `n`"),
+    };
     let problem = Problem {
         kind: file.kind,
         fen: file.fen,
@@ -209,6 +216,15 @@ mod tests {
         assert_eq!(m.author, Some(Authors::One("A. One".into())));
         assert_eq!(m.year, Some(Year::Text("2024-25".into())));
         assert_eq!(m.summary().as_deref(), Some("A. One, 2024-25"));
+    }
+
+    #[test]
+    fn n_is_required_except_for_release() {
+        let (p, _) = parse_problem(&format!(r#"{{"kind": "release", "fen": "{FEN}"}}"#)).unwrap();
+        assert_eq!((p.n, p.half), (0, false));
+        assert!(parse_problem(&format!(r#"{{"kind": "release", "fen": "{FEN}", "n": 2}}"#)).is_err());
+        assert!(parse_problem(&format!(r#"{{"fen": "{FEN}"}}"#)).is_err());
+        assert!(parse_problem(&format!(r#"{{"kind": "proof_game", "fen": "{FEN}"}}"#)).is_err());
     }
 
     #[test]

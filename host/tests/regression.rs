@@ -58,3 +58,14 @@ fn hmhopper25() {
         k: 1,
     });
 }
+
+/// Release the position with a full FEN (side to move and castling rights are compared).
+#[test]
+fn release() {
+    run(Case {
+        problem: "release_problem.json",
+        solutions: "release_solution.txt",
+        label: "Release",
+        k: 1,
+    });
+}

@@ -1,4 +1,5 @@
-//! Logic for verifying solutions of helpmates (h#n and h#n.5) and proof games (PG n.0 and PG n.5).
+//! Logic for verifying solutions of helpmates (h#n and h#n.5), proof games (PG n.0 and PG n.5)
+//! and Release the position (a legal game of any length reaching a position).
 //! The same code is used by both the zkVM guest and the host.
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use shakmaty::{
     fen::Fen,
     san::{San, SanError},
     uci::UciMove,
-    Board, CastlingMode, Chess, Color, Move, Position,
+    Board, CastlingMode, Chess, Color, EnPassantMode, Move, Position, Setup,
 };
 
 /// The kind of problem.
@@ -18,6 +19,9 @@ pub enum Kind {
     Helpmate,
     /// Proof game. Play starts from the standard initial position and reaches the placement in `fen`.
     ProofGame,
+    /// Release the position: a legal game of any length from the standard initial position that
+    /// reaches the position in `fen`, showing that the position is legal. `n` and `half` are unused.
+    Release,
 }
 
 /// The public problem.
@@ -31,6 +35,9 @@ pub struct Problem {
     /// (no castling rights, no en passant).
     /// Proof game: the target position. Only the piece placement (first FEN field) is compared.
     /// The side to move follows from the move count; castling rights and en passant are not compared.
+    /// Release: the target position. With only the piece placement, only the placement is compared.
+    /// With a full FEN, the side to move, castling rights and en passant square are compared too
+    /// (the en passant square must be given only when an en passant capture is legal).
     pub fen: String,
     /// The integer part n of the move count.
     pub n: u32,
@@ -64,9 +71,10 @@ impl Problem {
         }
     }
 
-    /// A label such as "h#2", "h#2.5", "PG 4.0" or "PG 3.5".
+    /// A label such as "h#2", "h#2.5", "PG 4.0", "PG 3.5" or "Release".
     pub fn label(&self) -> String {
         match (self.kind, self.half) {
+            (Kind::Release, _) => "Release".to_string(),
             (Kind::Helpmate, false) => format!("h#{}", self.n),
             (Kind::Helpmate, true) => format!("h#{}.5", self.n),
             (Kind::ProofGame, false) => format!("PG {}.0", self.n),
@@ -88,7 +96,39 @@ impl Problem {
                 .map_err(|_| Error::BadFen)?;
                 fen.into_position(CastlingMode::Standard).map_err(|_| Error::BadFen)
             }
-            Kind::ProofGame => Ok(Chess::default()),
+            Kind::ProofGame | Kind::Release => Ok(Chess::default()),
+        }
+    }
+}
+
+/// What the final position of a proof game or Release must match.
+enum Target {
+    /// Only the piece placement.
+    Placement(Board),
+    /// Placement, side to move, castling rights and (legal) en passant square.
+    Full(Setup),
+}
+
+impl Target {
+    /// Release: a placement-only FEN gives `Placement`, a full FEN gives `Full`.
+    fn release(fen: &str) -> Result<Target, Error> {
+        if fen.split_whitespace().count() <= 1 {
+            return Ok(Target::Placement(target_board(fen)?));
+        }
+        let fen: Fen = fen.parse().map_err(|_| Error::BadFen)?;
+        Ok(Target::Full(fen.into_setup()))
+    }
+
+    fn matches(&self, end: &Chess) -> bool {
+        match self {
+            Target::Placement(board) => end.board() == board,
+            Target::Full(t) => {
+                let e = end.to_setup(EnPassantMode::Legal);
+                e.board == t.board
+                    && e.turn == t.turn
+                    && e.castling_rights == t.castling_rights
+                    && e.ep_square == t.ep_square
+            }
         }
     }
 }
@@ -147,9 +187,11 @@ impl core::fmt::Display for Error {
                 candidates.join(", ")
             ),
             Error::NotCheckmate => write!(f, "Black is not checkmated in the final position"),
-            Error::NotReached => {
-                write!(f, "the final piece placement does not match the target position")
-            }
+            Error::NotReached => write!(
+                f,
+                "the final position does not match the target position \
+                 (piece placement, and for a full FEN in Release also side to move, castling rights and en passant)"
+            ),
             Error::SameAsExcluded => write!(f, "the moves are the same as an excluded known solution"),
             Error::ZeroK => write!(f, "k must be at least 1"),
             Error::WrongCount { expected, got } => {
@@ -237,12 +279,16 @@ pub fn verify_solution(problem: &Problem, moves: &[String]) -> Result<Vec<String
     }
     // Check that the target position parses before looking at the moves
     let target = match problem.kind {
-        Kind::ProofGame => Some(target_board(&problem.fen)?),
+        Kind::ProofGame => Some(Target::Placement(target_board(&problem.fen)?)),
+        Kind::Release => Some(Target::release(&problem.fen)?),
         Kind::Helpmate => None,
     };
-    let expected = problem.plies();
-    if moves.len() != expected {
-        return Err(Error::WrongLength { expected, got: moves.len() });
+    // Release has no fixed length
+    if problem.kind != Kind::Release {
+        let expected = problem.plies();
+        if moves.len() != expected {
+            return Err(Error::WrongLength { expected, got: moves.len() });
+        }
     }
 
     // A mate or stalemate partway through leaves no legal next move, so for helpmates
@@ -256,7 +302,7 @@ pub fn verify_solution(problem: &Problem, moves: &[String]) -> Result<Vec<String
             }
         }
         Some(target) => {
-            if end.board() != &target {
+            if !target.matches(&end) {
                 return Err(Error::NotReached);
             }
         }
@@ -445,6 +491,69 @@ mod tests {
     #[test]
     fn proof_game_rejects_bad_target() {
         assert_eq!(v(&pg("not a fen", 1, false), &mv("e4 e5")), Err(Error::BadFen));
+    }
+
+    // ---- Release the position ----
+
+    fn rel(fen: &str) -> Problem {
+        Problem { kind: Kind::Release, fen: fen.into(), n: 0, half: false, exclude: vec![], k: 1 }
+    }
+
+    // T. Orban's PG 4.0 position: the black king stands on e8 but has moved, so Black cannot castle.
+    const ORBAN: &str = "rnbqkbnr/pp3ppp/2p1p3/8/4P3/8/PPPP1PPP/RNBQK1NR";
+
+    #[test]
+    fn release_accepts_games_of_any_length() {
+        assert_eq!(rel(ORBAN).label(), "Release");
+        assert_eq!(v(&rel(ORBAN), &mv("e4 e6 Bb5 Ke7 Bxd7 c6 Be8 Kxe8")), Ok(()));
+        // A longer game reaching the same placement is fine too
+        assert_eq!(
+            v(&rel(ORBAN), &mv("Nf3 Nf6 Ng1 Ng8 e4 e6 Bb5 Ke7 Bxd7 c6 Be8 Kxe8")),
+            Ok(())
+        );
+        assert_eq!(v(&rel(ORBAN), &mv("e4 e6 Bb5 Ke7")), Err(Error::NotReached));
+    }
+
+    #[test]
+    fn release_full_fen_compares_turn_castling_and_ep() {
+        let game = mv("e4 e6 Bb5 Ke7 Bxd7 c6 Be8 Kxe8");
+        let full = |rest: &str| rel(&format!("{ORBAN} {rest}"));
+        assert_eq!(v(&full("w KQ - 0 5"), &game), Ok(()));
+        // Black has lost the right to castle
+        assert_eq!(v(&full("w KQkq - 0 5"), &game), Err(Error::NotReached));
+        // Wrong side to move
+        assert_eq!(v(&full("b KQ - 0 5"), &game), Err(Error::NotReached));
+        // Move counters are ignored
+        assert_eq!(v(&full("w KQ - 7 42"), &game), Ok(()));
+
+        // After 1.e4 Nf6 2.e5 d5, White can capture en passant on d6
+        let ep = "rnbqkb1r/ppp1pppp/5n2/3pP3/8/8/PPPP1PPP/RNBQKBNR";
+        let game = mv("e4 Nf6 e5 d5");
+        assert_eq!(v(&rel(&format!("{ep} w KQkq d6 0 3")), &game), Ok(()));
+        assert_eq!(v(&rel(&format!("{ep} w KQkq - 0 3")), &game), Err(Error::NotReached));
+        // With a quiet last move instead, the same placement has no en passant
+        let game = mv("e4 d5 e5 Nf6 Nf3 Ng8 Ng1 Nf6");
+        assert_eq!(v(&rel(&format!("{ep} w KQkq - 0 5")), &game), Ok(()));
+        assert_eq!(v(&rel(&format!("{ep} w KQkq d6 0 5")), &game), Err(Error::NotReached));
+    }
+
+    #[test]
+    fn release_castling_rights_lost_by_rook_moves() {
+        // Rooks go out and back: the placement is the initial one, but only queenside castling remains
+        let game = mv("Nf3 Nf6 Rg1 Rg8 Rh1 Rh8 Ng1 Ng8");
+        let start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+        assert_eq!(v(&rel(&format!("{start} w Qq - 0 5")), &game), Ok(()));
+        assert_eq!(v(&rel(&format!("{start} w KQkq - 0 5")), &game), Err(Error::NotReached));
+    }
+
+    #[test]
+    fn release_rejects_illegal_moves_and_bad_fen() {
+        assert!(matches!(
+            v(&rel(ORBAN), &mv("e4 e6 Bb5 Ke7 Bxd7 c6 Be8 Kd8")),
+            Err(Error::IllegalMove { ply: 8, .. })
+        ));
+        assert_eq!(v(&rel("not a fen"), &mv("e4")), Err(Error::BadFen));
+        assert_eq!(v(&rel(&format!("{ORBAN} x KQ - 0 5")), &mv("e4")), Err(Error::BadFen));
     }
 
     // ---- k distinct solutions ----
