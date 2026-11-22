@@ -1,0 +1,3 @@
+[alias]
+# Regression tests on the problems in examples/ (runs the guest in the zkVM executor, no proving)
+regression = "test --release -p host --test regression"
